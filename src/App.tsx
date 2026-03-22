@@ -21,11 +21,27 @@ import { Elements, CardElement, useStripe, useElements } from '@stripe/react-str
 import { PRODUCTS, Product, CartItem } from './types';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
+import { useSelector, useDispatch } from 'react-redux';
+import { RootState } from './store';
+import { addToCart, updateQuantity, removeFromCart, clearCart } from './store/cartSlice';
+import { useForm } from 'react-hook-form';
+import { zodResolver } from '@hookform/resolvers/zod';
+import * as z from 'zod';
 
 // Utility for tailwind classes
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
+
+const checkoutSchema = z.object({
+  fullName: z.string().min(2, 'Full name is required'),
+  email: z.string().email('Invalid email address'),
+  address: z.string().min(5, 'Address is required'),
+  city: z.string().min(2, 'City is required'),
+  zipCode: z.string().min(5, 'Invalid zip code'),
+});
+
+type CheckoutFormData = z.infer<typeof checkoutSchema>;
 
 const stripePromise = loadStripe((import.meta as any).env.VITE_STRIPE_PUBLISHABLE_KEY || '');
 
@@ -148,9 +164,10 @@ const HomeView = () => {
   );
 };
 
-const ProductDetail = ({ addToCart }: { addToCart: (p: Product) => void }) => {
+const ProductDetail = () => {
   const { id } = useParams();
   const navigate = useNavigate();
+  const dispatch = useDispatch();
   const product = PRODUCTS.find(p => p.id === id);
 
   if (!product) return <div>Product not found</div>;
@@ -200,7 +217,7 @@ const ProductDetail = ({ addToCart }: { addToCart: (p: Product) => void }) => {
           <div className="mt-12">
             <button 
               onClick={() => {
-                addToCart(product);
+                dispatch(addToCart(product));
                 navigate('/cart');
               }}
               className="w-full bg-zinc-900 text-white py-5 rounded-2xl font-bold text-lg shadow-xl shadow-zinc-200 flex items-center justify-center gap-3 active:scale-[0.98] transition-transform"
@@ -215,15 +232,9 @@ const ProductDetail = ({ addToCart }: { addToCart: (p: Product) => void }) => {
   );
 };
 
-const CartView = ({ 
-  cart, 
-  updateQuantity, 
-  removeFromCart 
-}: { 
-  cart: CartItem[], 
-  updateQuantity: (id: string, delta: number) => void,
-  removeFromCart: (id: string) => void
-}) => {
+const CartView = () => {
+  const cart = useSelector((state: RootState) => state.cart.items);
+  const dispatch = useDispatch();
   const total = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
 
   return (
@@ -251,18 +262,18 @@ const CartView = ({
               <div className="flex-1 flex flex-col justify-between">
                 <div className="flex justify-between">
                   <h3 className="font-bold text-zinc-900 text-sm">{item.name}</h3>
-                  <button onClick={() => removeFromCart(item.id)}>
+                  <button onClick={() => dispatch(removeFromCart(item.id))}>
                     <X className="w-4 h-4 text-zinc-400" />
                   </button>
                 </div>
                 <div className="flex justify-between items-end">
                   <p className="font-bold text-emerald-600 text-sm">${item.price}</p>
                   <div className="flex items-center gap-4 bg-zinc-50 rounded-lg px-3 py-1">
-                    <button onClick={() => updateQuantity(item.id, -1)}>
+                    <button onClick={() => dispatch(updateQuantity({ id: item.id, delta: -1 }))}>
                       <Minus className="w-3 h-3 text-zinc-400" />
                     </button>
                     <span className="font-bold text-xs w-4 text-center">{item.quantity}</span>
-                    <button onClick={() => updateQuantity(item.id, 1)}>
+                    <button onClick={() => dispatch(updateQuantity({ id: item.id, delta: 1 }))}>
                       <Plus className="w-3 h-3 text-zinc-400" />
                     </button>
                   </div>
@@ -298,10 +309,11 @@ const CartView = ({
   );
 };
 
-const CheckoutForm = ({ total }: { total: number }) => {
+const CheckoutForm = ({ total, formData }: { total: number; formData: CheckoutFormData }) => {
   const stripe = useStripe();
   const elements = useElements();
   const navigate = useNavigate();
+  const dispatch = useDispatch();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [paymentMethod, setPaymentMethod] = useState<'stripe' | 'cod'>('stripe');
@@ -313,6 +325,7 @@ const CheckoutForm = ({ total }: { total: number }) => {
 
     if (paymentMethod === 'cod') {
       await new Promise(r => setTimeout(r, 1500));
+      dispatch(clearCart());
       navigate('/success');
       return;
     }
@@ -333,12 +346,22 @@ const CheckoutForm = ({ total }: { total: number }) => {
       const { error: stripeError, paymentIntent } = await stripe.confirmCardPayment(data.clientSecret, {
         payment_method: {
           card: elements.getElement(CardElement) as any,
+          billing_details: {
+            name: formData.fullName,
+            email: formData.email,
+            address: {
+              line1: formData.address,
+              city: formData.city,
+              postal_code: formData.zipCode,
+            }
+          }
         },
       });
 
       if (stripeError) {
         setError(stripeError.message || 'Payment failed');
       } else if (paymentIntent?.status === 'succeeded') {
+        dispatch(clearCart());
         navigate('/success');
       }
     } catch (err: any) {
@@ -410,7 +433,25 @@ const CheckoutForm = ({ total }: { total: number }) => {
   );
 };
 
-const CheckoutView = ({ total }: { total: number }) => {
+const CheckoutView = () => {
+  const cart = useSelector((state: RootState) => state.cart.items);
+  const total = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
+  const [isFormValid, setIsFormValid] = useState(false);
+
+  const {
+    register,
+    handleSubmit,
+    formState: { errors, isValid },
+    getValues
+  } = useForm<CheckoutFormData>({
+    resolver: zodResolver(checkoutSchema),
+    mode: 'onChange'
+  });
+
+  useEffect(() => {
+    setIsFormValid(isValid);
+  }, [isValid]);
+
   return (
     <div className="pt-24 pb-32 px-6 max-w-3xl mx-auto">
       <h1 className="text-3xl font-serif font-bold mb-8">Checkout</h1>
@@ -419,18 +460,84 @@ const CheckoutView = ({ total }: { total: number }) => {
         <div className="space-y-4">
           <h3 className="font-bold text-xs uppercase tracking-wider text-zinc-400">Shipping Address</h3>
           <div className="space-y-3">
-            <input type="text" placeholder="Full Name" className="w-full p-4 bg-white rounded-xl border border-zinc-100 focus:outline-none focus:border-zinc-900 transition-colors" />
-            <input type="text" placeholder="Street Address" className="w-full p-4 bg-white rounded-xl border border-zinc-100 focus:outline-none focus:border-zinc-900 transition-colors" />
+            <div>
+              <input 
+                {...register('fullName')}
+                type="text" 
+                placeholder="Full Name" 
+                className={cn(
+                  "w-full p-4 bg-white rounded-xl border focus:outline-none transition-colors",
+                  errors.fullName ? "border-red-500" : "border-zinc-100 focus:border-zinc-900"
+                )} 
+              />
+              {errors.fullName && <p className="text-red-500 text-[10px] mt-1 ml-1">{errors.fullName.message}</p>}
+            </div>
+
+            <div>
+              <input 
+                {...register('email')}
+                type="email" 
+                placeholder="Email Address" 
+                className={cn(
+                  "w-full p-4 bg-white rounded-xl border focus:outline-none transition-colors",
+                  errors.email ? "border-red-500" : "border-zinc-100 focus:border-zinc-900"
+                )} 
+              />
+              {errors.email && <p className="text-red-500 text-[10px] mt-1 ml-1">{errors.email.message}</p>}
+            </div>
+
+            <div>
+              <input 
+                {...register('address')}
+                type="text" 
+                placeholder="Street Address" 
+                className={cn(
+                  "w-full p-4 bg-white rounded-xl border focus:outline-none transition-colors",
+                  errors.address ? "border-red-500" : "border-zinc-100 focus:border-zinc-900"
+                )} 
+              />
+              {errors.address && <p className="text-red-500 text-[10px] mt-1 ml-1">{errors.address.message}</p>}
+            </div>
+
             <div className="grid grid-cols-2 gap-3">
-              <input type="text" placeholder="City" className="w-full p-4 bg-white rounded-xl border border-zinc-100 focus:outline-none focus:border-zinc-900 transition-colors" />
-              <input type="text" placeholder="Zip Code" className="w-full p-4 bg-white rounded-xl border border-zinc-100 focus:outline-none focus:border-zinc-900 transition-colors" />
+              <div>
+                <input 
+                  {...register('city')}
+                  type="text" 
+                  placeholder="City" 
+                  className={cn(
+                    "w-full p-4 bg-white rounded-xl border focus:outline-none transition-colors",
+                    errors.city ? "border-red-500" : "border-zinc-100 focus:border-zinc-900"
+                  )} 
+                />
+                {errors.city && <p className="text-red-500 text-[10px] mt-1 ml-1">{errors.city.message}</p>}
+              </div>
+
+              <div>
+                <input 
+                  {...register('zipCode')}
+                  type="text" 
+                  placeholder="Zip Code" 
+                  className={cn(
+                    "w-full p-4 bg-white rounded-xl border focus:outline-none transition-colors",
+                    errors.zipCode ? "border-red-500" : "border-zinc-100 focus:border-zinc-900"
+                  )} 
+                />
+                {errors.zipCode && <p className="text-red-500 text-[10px] mt-1 ml-1">{errors.zipCode.message}</p>}
+              </div>
             </div>
           </div>
         </div>
 
-        <Elements stripe={stripePromise}>
-          <CheckoutForm total={total} />
-        </Elements>
+        {isFormValid ? (
+          <Elements stripe={stripePromise}>
+            <CheckoutForm total={total} formData={getValues()} />
+          </Elements>
+        ) : (
+          <div className="p-8 bg-zinc-100 rounded-2xl text-center">
+            <p className="text-zinc-400 text-sm">Please complete the shipping address to proceed to payment</p>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -459,36 +566,8 @@ const SuccessView = () => (
 // --- Main App ---
 
 export default function App() {
-  const [cart, setCart] = useState<CartItem[]>([]);
-
-  const addToCart = (product: Product) => {
-    setCart(prev => {
-      const existing = prev.find(item => item.id === product.id);
-      if (existing) {
-        return prev.map(item => 
-          item.id === product.id ? { ...item, quantity: item.quantity + 1 } : item
-        );
-      }
-      return [...prev, { ...product, quantity: 1 }];
-    });
-  };
-
-  const updateQuantity = (id: string, delta: number) => {
-    setCart(prev => prev.map(item => {
-      if (item.id === id) {
-        const newQty = Math.max(1, item.quantity + delta);
-        return { ...item, quantity: newQty };
-      }
-      return item;
-    }));
-  };
-
-  const removeFromCart = (id: string) => {
-    setCart(prev => prev.filter(item => item.id !== id));
-  };
-
+  const cart = useSelector((state: RootState) => state.cart.items);
   const cartCount = cart.reduce((sum, item) => sum + item.quantity, 0);
-  const total = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
 
   return (
     <Router>
@@ -499,9 +578,9 @@ export default function App() {
           <AnimatePresence mode="wait">
             <Routes>
               <Route path="/" element={<HomeView />} />
-              <Route path="/product/:id" element={<ProductDetail addToCart={addToCart} />} />
-              <Route path="/cart" element={<CartView cart={cart} updateQuantity={updateQuantity} removeFromCart={removeFromCart} />} />
-              <Route path="/checkout" element={<CheckoutView total={total} />} />
+              <Route path="/product/:id" element={<ProductDetail />} />
+              <Route path="/cart" element={<CartView />} />
+              <Route path="/checkout" element={<CheckoutView />} />
               <Route path="/success" element={<SuccessView />} />
             </Routes>
           </AnimatePresence>
